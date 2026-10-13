@@ -281,7 +281,10 @@ impl Drop for File {
             return;
         }
 
-        let _ = self.session.close_nowait(std::mem::take(&mut self.handle));
+        let handle = std::mem::take(&mut self.handle);
+        if !handle.is_empty() {
+            self.session.close_detached(handle);
+        }
     }
 }
 
@@ -481,6 +484,8 @@ impl AsyncWrite for File {
 
         if poll.is_ready() {
             self.state.f_shutdown = None;
+            self.closed = true;
+            self.handle.clear();
         }
 
         poll

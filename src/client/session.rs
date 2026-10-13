@@ -167,6 +167,7 @@ impl SftpSession {
     pub async fn write<P: Into<SftpString>>(&self, path: P, data: &[u8]) -> SftpResult<()> {
         let mut file = self.create(path).await?;
         file.write_all(data).await?;
+        file.flush().await?;
         file.close().await?;
         Ok(())
     }
@@ -311,7 +312,10 @@ impl SftpSession {
             return Ok(None);
         }
 
-        let name = self.session.expand_path(path).await?;
+        let name = self
+            .session
+            .expand_path(String::from_utf8_lossy(&path.into()).into_owned())
+            .await?;
         match name.files.first() {
             Some(file) => Ok(Some(file.filename.to_owned())),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
