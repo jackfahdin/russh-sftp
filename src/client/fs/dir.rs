@@ -46,10 +46,15 @@ impl DirEntry {
     pub fn path_bytes(&self) -> Vec<u8> {
         if self.parent.is_empty() {
             self.file.clone()
-        } else if self.parent.ends_with('/') {
-            format!("{}{}", self.parent, self.file)
+        } else if self.parent.ends_with(b"/") {
+            let mut path = self.parent.to_vec();
+            path.extend_from_slice(&self.file);
+            path
         } else {
-            format!("{}/{}", self.parent, self.file)
+            let mut path = self.parent.to_vec();
+            path.push(b'/');
+            path.extend_from_slice(&self.file);
+            path
         }
     }
 }
@@ -66,7 +71,7 @@ impl Iterator for ReadDir {
     fn next(&mut self) -> Option<Self::Item> {
         match self.entries.pop_front() {
             None => None,
-            Some(entry) if entry.0 == "." || entry.0 == ".." => self.next(),
+            Some(entry) if entry.0 == b"." || entry.0 == b".." => self.next(),
             Some(entry) => Some(DirEntry {
                 parent: self.parent.clone(),
                 file: entry.0,

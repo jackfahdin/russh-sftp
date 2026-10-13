@@ -103,6 +103,19 @@ impl SessionInner {
     }
 }
 
+fn fail_all_pending_requests(requests: &SharedRequests, error: Error) {
+    let ids = requests
+        .iter()
+        .map(|entry| *entry.key())
+        .collect::<Vec<_>>();
+
+    for id in ids {
+        if let Some((_, sender)) = requests.remove(&id) {
+            let _ = sender.send(Err(error.clone()));
+        }
+    }
+}
+
 impl Drop for SessionInner {
     fn drop(&mut self) {
         // Wake pending requests when the transport stops.
@@ -145,7 +158,7 @@ impl Handler for SessionInner {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Limits {
     pub packet_len: Option<u64>,
     pub read_len: Option<u64>,
@@ -214,10 +227,16 @@ impl RawSftpSession {
             version: None,
             requests: req_map.clone(),
         };
+        let fail_requests = req_map.clone();
         let timeout = AtomicU64::new(cfg.request_timeout_secs);
 
         Self {
-            tx: run_with_config(stream, inner, cfg),
+            tx: run_with_config(
+                stream,
+                inner,
+                cfg,
+                Arc::new(move |error| fail_all_pending_requests(&fail_requests, error)),
+            ),
             requests: req_map,
             next_req_id: AtomicU32::new(1),
             handles: AtomicU64::new(0),
@@ -263,7 +282,10 @@ impl RawSftpSession {
             completed: false,
         };
         self.requests.insert(id, tx);
-        self.tx.send(bytes)?;
+        if let Err(error) = self.tx.send(bytes) {
+            self.requests.remove(&id);
+            return Err(error.into());
+        }
 
         Ok(request)
     }
@@ -274,6 +296,23 @@ impl RawSftpSession {
 
     fn use_next_id(&self) -> u32 {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn release_handle(&self) {
+        if self
+            .handles
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            })
+            .is_err()
+        {
+            warn!("attempt to release more SFTP handles than exist");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_handle_count(&self) -> u64 {
+        self.handles.load(Ordering::SeqCst)
     }
 
     /// Closes the inner channel stream. Called by [`Drop`]
@@ -324,7 +363,7 @@ impl RawSftpSession {
                 Some(id),
                 Open {
                     id,
-                    filename: filename.into(),
+                    filename,
                     pflags: flags,
                     attrs,
                 }
@@ -347,15 +386,19 @@ impl RawSftpSession {
     /// Sends a close packet without awaiting the server's acknowledgement.
     pub(crate) fn close_nowait(&self, handle: String) -> SftpResult<Request> {
         let id = self.use_next_id();
-        let request = self.send(Some(id), Close { id, handle }.into())?;
-        if self
-            .handles
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| h.checked_sub(1))
-            .is_err()
-        {
-            warn!("attempt to close more handles than exist");
-        }
-        Ok(request)
+        let request = self.send(Some(id), Close { id, handle }.into());
+        self.release_handle();
+        request
+    }
+
+    /// Sends a close packet in the background while keeping the request tracked.
+    pub(crate) fn close_detached(self: &Arc<Self>, handle: String) {
+        let session = Arc::clone(self);
+        runtime::spawn(async move {
+            if let Err(error) = session.close(handle).await {
+                trace!("detached SFTP handle close failed: {error}");
+            }
+        });
     }
 
     pub async fn read<H: Into<String>>(
@@ -463,16 +506,7 @@ impl RawSftpSession {
 
     pub async fn lstat_bytes(&self, path: Vec<u8>) -> SftpResult<Attrs> {
         let id = self.use_next_id();
-        let result = self
-            .request(
-                Some(id),
-                Lstat {
-                    id,
-                    path: path.into(),
-                }
-                .into(),
-            )
-            .await?;
+        let result = self.request(Some(id), Lstat { id, path }.into()).await?;
 
         into_with_status!(result, Attrs)
     }
@@ -504,15 +538,7 @@ impl RawSftpSession {
     pub async fn setstat_bytes(&self, path: Vec<u8>, attrs: FileAttributes) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(
-                Some(id),
-                SetStat {
-                    id,
-                    path: path.into(),
-                    attrs,
-                }
-                .into(),
-            )
+            .request(Some(id), SetStat { id, path, attrs }.into())
             .await?;
 
         into_status!(result)
@@ -553,16 +579,7 @@ impl RawSftpSession {
         }
 
         let id = self.use_next_id();
-        let result = self
-            .request(
-                Some(id),
-                OpenDir {
-                    id,
-                    path: path.into(),
-                }
-                .into(),
-            )
-            .await?;
+        let result = self.request(Some(id), OpenDir { id, path }.into()).await?;
 
         if let Packet::Handle(_) = result {
             self.handles.fetch_add(1, Ordering::SeqCst);
@@ -594,14 +611,7 @@ impl RawSftpSession {
     pub async fn remove_bytes(&self, filename: Vec<u8>) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(
-                Some(id),
-                Remove {
-                    id,
-                    filename: filename.into(),
-                }
-                .into(),
-            )
+            .request(Some(id), Remove { id, filename }.into())
             .await?;
 
         into_status!(result)
@@ -618,15 +628,7 @@ impl RawSftpSession {
     pub async fn mkdir_bytes(&self, path: Vec<u8>, attrs: FileAttributes) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(
-                Some(id),
-                MkDir {
-                    id,
-                    path: path.into(),
-                    attrs,
-                }
-                .into(),
-            )
+            .request(Some(id), MkDir { id, path, attrs }.into())
             .await?;
 
         into_status!(result)
@@ -638,16 +640,7 @@ impl RawSftpSession {
 
     pub async fn rmdir_bytes(&self, path: Vec<u8>) -> SftpResult<Status> {
         let id = self.use_next_id();
-        let result = self
-            .request(
-                Some(id),
-                RmDir {
-                    id,
-                    path: path.into(),
-                }
-                .into(),
-            )
-            .await?;
+        let result = self.request(Some(id), RmDir { id, path }.into()).await?;
 
         into_status!(result)
     }
@@ -658,16 +651,7 @@ impl RawSftpSession {
 
     pub async fn realpath_bytes(&self, path: Vec<u8>) -> SftpResult<Name> {
         let id = self.use_next_id();
-        let result = self
-            .request(
-                Some(id),
-                RealPath {
-                    id,
-                    path: path.into(),
-                }
-                .into(),
-            )
-            .await?;
+        let result = self.request(Some(id), RealPath { id, path }.into()).await?;
 
         into_with_status!(result, Name)
     }
@@ -678,16 +662,7 @@ impl RawSftpSession {
 
     pub async fn stat_bytes(&self, path: Vec<u8>) -> SftpResult<Attrs> {
         let id = self.use_next_id();
-        let result = self
-            .request(
-                Some(id),
-                Stat {
-                    id,
-                    path: path.into(),
-                }
-                .into(),
-            )
-            .await?;
+        let result = self.request(Some(id), Stat { id, path }.into()).await?;
 
         into_with_status!(result, Attrs)
     }
@@ -708,8 +683,8 @@ impl RawSftpSession {
                 Some(id),
                 Rename {
                     id,
-                    oldpath: oldpath.into(),
-                    newpath: newpath.into(),
+                    oldpath,
+                    newpath,
                 }
                 .into(),
             )
@@ -743,21 +718,22 @@ impl RawSftpSession {
         let result = self
             .request(
                 Some(id),
-                ReadLink {
+                Symlink {
                     id,
-                    path: path.into(),
+                    linkpath: path,
+                    targetpath: target,
                 }
                 .into(),
             )
             .await?;
 
-        into_with_status!(result, Name)
+        into_status!(result)
     }
 
     pub async fn symlink<P, T>(&self, path: P, target: T) -> SftpResult<Status>
     where
-        P: Into<String>,
         T: Into<String>,
+        L: Into<String>,
     {
         let id = self.use_next_id();
         let result = self
@@ -765,8 +741,8 @@ impl RawSftpSession {
                 Some(id),
                 Symlink {
                     id,
-                    linkpath: path.into(),
-                    targetpath: target.into(),
+                    linkpath: target,
+                    targetpath: link,
                 }
                 .into(),
             )
@@ -873,5 +849,254 @@ impl RawSftpSession {
 impl Drop for RawSftpSession {
     fn drop(&mut self) {
         let _ = self.close_session();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncWriteExt, DuplexStream};
+
+    async fn read_client_packet(server: &mut DuplexStream) -> Packet {
+        let mut bytes = crate::utils::read_packet(server, u32::MAX)
+            .await
+            .expect("server should read client packet");
+        Packet::try_from(&mut bytes).expect("client packet should decode")
+    }
+
+    async fn write_server_packet(server: &mut DuplexStream, packet: Packet) {
+        let bytes = Bytes::try_from(packet).expect("server packet should encode");
+        server
+            .write_all(&bytes)
+            .await
+            .expect("server should write packet");
+    }
+
+    async fn initialize_session(session: &RawSftpSession, server: &mut DuplexStream) {
+        let client = session.init();
+        let server = async {
+            match read_client_packet(server).await {
+                Packet::Init(_) => {}
+                packet => panic!("expected init packet, got {packet:?}"),
+            }
+            write_server_packet(server, Version::new().into()).await;
+        };
+
+        let (client_result, _) = tokio::join!(client, server);
+        client_result.expect("session should initialize");
+    }
+
+    async fn open_test_handle(session: &RawSftpSession, server: &mut DuplexStream) -> String {
+        let client = session.open("remote.txt", OpenFlags::READ, FileAttributes::empty());
+        let server = async {
+            let id = match read_client_packet(server).await {
+                Packet::Open(open) => open.id,
+                packet => panic!("expected open packet, got {packet:?}"),
+            };
+            write_server_packet(
+                server,
+                Handle {
+                    id,
+                    handle: "handle-1".to_string(),
+                }
+                .into(),
+            )
+            .await;
+        };
+
+        let (client_result, _) = tokio::join!(client, server);
+        client_result.expect("open should succeed").handle
+    }
+
+    async fn close_test_handle(
+        session: &RawSftpSession,
+        server: &mut DuplexStream,
+        handle: String,
+        status_code: StatusCode,
+    ) -> SftpResult<Status> {
+        let client = session.close(handle);
+        let server = async {
+            let id = match read_client_packet(server).await {
+                Packet::Close(close) => close.id,
+                packet => panic!("expected close packet, got {packet:?}"),
+            };
+            write_server_packet(
+                server,
+                Packet::status(id, status_code, &status_code.to_string(), "en-US"),
+            )
+            .await;
+        };
+
+        let (client_result, _) = tokio::join!(client, server);
+        client_result
+    }
+
+    fn test_config(request_timeout_secs: u64) -> Config {
+        Config {
+            request_timeout_secs,
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn write_nowait_times_out_and_cleans_pending_request() {
+        let (client, _server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(0));
+        let pending = session
+            .write_nowait_from_slice("handle", 0, b"payload")
+            .expect("write request should be queued");
+
+        assert_eq!(session.requests.len(), 1);
+        let error = pending.await.expect_err("write ack should time out");
+
+        assert!(matches!(error, Error::Timeout));
+        assert!(session.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_pending_request_cleans_pending_map() {
+        let (client, _server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        let pending = session
+            .write_nowait_from_slice("handle", 0, b"payload")
+            .expect("write request should be queued");
+
+        assert_eq!(session.requests.len(), 1);
+        drop(pending);
+
+        assert!(session.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_write_failure_wakes_pending_request() {
+        let (client, server) = tokio::io::duplex(64);
+        drop(server);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        let payload = vec![0; 1024];
+        let pending = session
+            .write_nowait_from_slice("handle", 0, &payload)
+            .expect("write request should be queued before write task observes closure");
+
+        let error = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("pending request should be failed promptly")
+            .expect_err("stream write failure should fail the request");
+
+        assert!(matches!(error, Error::IO(_) | Error::UnexpectedBehavior(_)));
+        assert!(session.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_incoming_packet_wakes_pending_request_without_reading_payload() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(
+            client,
+            Config {
+                max_packet_len: 64,
+                ..test_config(10)
+            },
+        );
+        let pending = session
+            .write_nowait_from_slice("handle", 0, b"payload")
+            .expect("write should be queued");
+        server.write_u32(65).await.expect("length should be sent");
+
+        let error = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("packet limit should fail the request before its deadline")
+            .expect_err("oversized packet should fail the request");
+
+        assert!(
+            matches!(error, Error::UnexpectedBehavior(message) if message.contains("packet length limit exceeded"))
+        );
+        assert!(session.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_success_increments_handle_count() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        initialize_session(&session, &mut server).await;
+
+        let _handle = open_test_handle(&session, &mut server).await;
+
+        assert_eq!(session.open_handle_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_success_decrements_handle_count() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        initialize_session(&session, &mut server).await;
+        let handle = open_test_handle(&session, &mut server).await;
+
+        close_test_handle(&session, &mut server, handle, StatusCode::Ok)
+            .await
+            .expect("close should succeed");
+
+        assert_eq!(session.open_handle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn close_status_error_decrements_handle_count() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        initialize_session(&session, &mut server).await;
+        let handle = open_test_handle(&session, &mut server).await;
+
+        let error = close_test_handle(&session, &mut server, handle, StatusCode::Failure)
+            .await
+            .expect_err("close status failure should be returned");
+
+        assert!(matches!(
+            error,
+            Error::Status(status) if status.status_code == StatusCode::Failure
+        ));
+        assert_eq!(session.open_handle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn close_timeout_decrements_handle_count() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        initialize_session(&session, &mut server).await;
+        let handle = open_test_handle(&session, &mut server).await;
+        session.set_timeout(0);
+
+        let error = session
+            .close(handle)
+            .await
+            .expect_err("close should time out");
+
+        assert!(matches!(error, Error::Timeout));
+        assert_eq!(session.open_handle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn close_stream_failure_decrements_handle_count() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+        initialize_session(&session, &mut server).await;
+        let handle = open_test_handle(&session, &mut server).await;
+        drop(server);
+
+        let error = session
+            .close(handle)
+            .await
+            .expect_err("close should fail after stream closes");
+
+        assert!(matches!(error, Error::IO(_) | Error::UnexpectedBehavior(_)));
+        assert_eq!(session.open_handle_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_release_does_not_underflow() {
+        let (client, _server) = tokio::io::duplex(4096);
+        let session = RawSftpSession::new_with_config(client, test_config(10));
+
+        session.release_handle();
+        session.release_handle();
+
+        assert_eq!(session.open_handle_count(), 0);
     }
 }

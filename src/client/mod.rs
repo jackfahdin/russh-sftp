@@ -10,6 +10,7 @@ pub use rawsession::RawSftpSession;
 pub use session::SftpSession;
 
 use bytes::Bytes;
+use std::sync::Arc;
 use tokio::{
     io::{self, AsyncRead, AsyncWrite, AsyncWriteExt},
     select,
@@ -17,7 +18,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{error::Error, protocol::Packet, utils::read_packet};
+use crate::{error::Error as StreamError, protocol::Packet, utils::read_packet};
 
 macro_rules! into_wrap {
     ($handler:expr) => {
@@ -72,7 +73,11 @@ where
     }
 }
 
-async fn process_handler<S, H>(stream: &mut S, handler: &mut H, cfg: &Config) -> Result<(), Error>
+async fn process_handler<S, H>(
+    stream: &mut S,
+    handler: &mut H,
+    cfg: &Config,
+) -> Result<(), StreamError>
 where
     S: AsyncRead + Unpin,
     H: Handler + Send,
@@ -83,16 +88,25 @@ where
 
 /// Run processing stream as SFTP client. Is a simple handler of incoming
 /// and outgoing packets. Can be used for non-standard implementations
-pub fn run<S, H>(stream: S, handler: H) -> mpsc::UnboundedSender<Bytes>
+pub fn run<S, H>(
+    stream: S,
+    handler: H,
+    fail_pending: Arc<dyn Fn(error::Error) + Send + Sync + 'static>,
+) -> mpsc::UnboundedSender<Bytes>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     H: Handler + Send + 'static,
 {
-    run_with_config(stream, handler, Config::default())
+    run_with_config(stream, handler, Config::default(), fail_pending)
 }
 
 /// Run processing stream as SFTP client with custom configuration
-pub fn run_with_config<S, H>(stream: S, mut handler: H, cfg: Config) -> mpsc::UnboundedSender<Bytes>
+pub fn run_with_config<S, H>(
+    stream: S,
+    mut handler: H,
+    cfg: Config,
+    fail_pending: Arc<dyn Fn(error::Error) + Send + Sync + 'static>,
+) -> mpsc::UnboundedSender<Bytes>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     H: Handler + Send + 'static,
@@ -103,16 +117,25 @@ where
     let rc = CancellationToken::new();
     let wc = rc.clone();
     {
+        let fail_pending = fail_pending.clone();
         runtime::spawn(async move {
             loop {
                 select! {
                     result = process_handler(&mut rd, &mut handler, &cfg) => {
                         match result {
-                            Err(Error::UnexpectedEof) => break,
+                            Err(StreamError::UnexpectedEof) => {
+                                fail_pending(error::Error::UnexpectedBehavior(
+                                    "SFTP stream closed".to_owned(),
+                                ));
+                                break;
+                            }
                             Err(err) => {
                                 warn!("{}", err);
+                                fail_pending(error::Error::UnexpectedBehavior(format!(
+                                    "SFTP stream failed: {err}",
+                                )));
                                 break;
-                            },
+                            }
                             Ok(_) => (),
                         }
                     },
@@ -137,6 +160,8 @@ where
 
                     if let Err(error) = wr.write_all(&data[..]).await {
                         warn!("{}", error);
+                        fail_pending(error::Error::from(error));
+                        wc.cancel();
                         break;
                     }
                 },
