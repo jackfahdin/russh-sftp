@@ -6,15 +6,19 @@ use crate::protocol::FileType;
 /// Entries returned by the [`ReadDir`] iterator.
 #[derive(Debug)]
 pub struct DirEntry {
-    parent: Arc<str>,
-    file: String,
+    parent: Arc<[u8]>,
+    file: Vec<u8>,
     metadata: Metadata,
 }
 
 impl DirEntry {
     /// Returns the file name for the file that this entry points at.
     pub fn file_name(&self) -> String {
-        self.file.to_owned()
+        String::from_utf8_lossy(&self.file).into_owned()
+    }
+
+    pub fn file_name_bytes(&self) -> &[u8] {
+        &self.file
     }
 
     /// Returns the file type for the file that this entry points at.
@@ -36,6 +40,10 @@ impl DirEntry {
     /// relative input yields a relative result — mirroring the behaviour of
     /// [`std::fs::DirEntry::path`].
     pub fn path(&self) -> String {
+        String::from_utf8_lossy(&self.path_bytes()).into_owned()
+    }
+
+    pub fn path_bytes(&self) -> Vec<u8> {
         if self.parent.is_empty() {
             self.file.clone()
         } else if self.parent.ends_with('/') {
@@ -48,8 +56,8 @@ impl DirEntry {
 
 /// Iterator over the entries in a remote directory.
 pub struct ReadDir {
-    pub(crate) parent: Arc<str>,
-    pub(crate) entries: VecDeque<(String, Metadata)>,
+    pub(crate) parent: Arc<[u8]>,
+    pub(crate) entries: VecDeque<(Vec<u8>, Metadata)>,
 }
 
 impl Iterator for ReadDir {
