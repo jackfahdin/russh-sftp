@@ -91,6 +91,22 @@ impl SftpSession {
         self.session.set_timeout(secs);
     }
 
+    /// Returns limits advertised by the server via the `limits@openssh.com`
+    /// extension, when available.
+    pub fn limits(&self) -> Option<Limits> {
+        self.features.limits
+    }
+
+    /// Returns the effective maximum packet length after applying server limits.
+    pub fn effective_max_packet_len(&self) -> u32 {
+        self.features.max_packet_len
+    }
+
+    /// Returns the maximum number of open handles advertised by the server.
+    pub fn max_open_handles(&self) -> Option<u64> {
+        self.features.limits.and_then(|limits| limits.open_handles)
+    }
+
     /// Closes the inner channel stream.
     pub async fn close(&self) -> SftpResult<()> {
         self.session.close_session()
@@ -242,7 +258,45 @@ impl SftpSession {
         P: Into<SftpString>,
         T: Into<SftpString>,
     {
-        self.session.symlink(path, target).await.map(|_| ())
+        self.symlink_bytes(path.into().into_bytes(), target.into().into_bytes())
+            .await
+    }
+
+    /// Creates a symlink of the specified target using raw SFTP path bytes.
+    pub async fn symlink_bytes<P, T>(&self, path: P, target: T) -> SftpResult<()>
+    where
+        P: Into<Vec<u8>>,
+        T: Into<Vec<u8>>,
+    {
+        self.session
+            .symlink_bytes(path.into(), target.into())
+            .await
+            .map(|_| ())
+    }
+
+    /// Creates a symlink using OpenSSH SFTP argument ordering.
+    ///
+    /// OpenSSH's `SSH_FXP_SYMLINK` implementation expects `(target, link)`,
+    /// which is the reverse of the order documented by the old draft protocol.
+    pub async fn symlink_openssh<T, L>(&self, target: T, link: L) -> SftpResult<()>
+    where
+        T: Into<String>,
+        L: Into<String>,
+    {
+        self.symlink_openssh_bytes(target.into().into_bytes(), link.into().into_bytes())
+            .await
+    }
+
+    /// Creates an OpenSSH-ordered symlink using raw SFTP path bytes.
+    pub async fn symlink_openssh_bytes<T, L>(&self, target: T, link: L) -> SftpResult<()>
+    where
+        T: Into<Vec<u8>>,
+        L: Into<Vec<u8>>,
+    {
+        self.session
+            .symlink_openssh_bytes(target.into(), link.into())
+            .await
+            .map(|_| ())
     }
 
     /// Queries metadata about the remote file.
