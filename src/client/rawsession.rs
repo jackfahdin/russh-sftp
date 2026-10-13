@@ -730,11 +730,20 @@ impl RawSftpSession {
         into_status!(result)
     }
 
-    pub async fn symlink<P, T>(&self, path: P, target: T) -> SftpResult<Status>
+    pub async fn symlink_openssh<T, L>(&self, target: T, link: L) -> SftpResult<Status>
     where
         T: Into<String>,
         L: Into<String>,
     {
+        self.symlink_openssh_bytes(target.into().into_bytes(), link.into().into_bytes())
+            .await
+    }
+
+    pub async fn symlink_openssh_bytes(
+        &self,
+        target: Vec<u8>,
+        link: Vec<u8>,
+    ) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
             .request(
