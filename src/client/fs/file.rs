@@ -515,3 +515,87 @@ impl AsyncWrite for File {
         poll
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{io, sync::Arc};
+
+    use tokio::io::AsyncWriteExt;
+
+    use super::{Features, File, RawSftpSession};
+    use crate::client::Config;
+
+    fn test_features() -> Features {
+        Features {
+            posix_rename: false,
+            hardlink: false,
+            fsync: false,
+            statvfs: false,
+            expand_path: false,
+            limits: None,
+            max_concurrent_reads: 8,
+            max_concurrent_writes: 8,
+            max_write_packet_len: 32_768,
+            max_packet_len: 262_144,
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_times_out_when_write_ack_never_arrives() {
+        let (client, _server) = tokio::io::duplex(4096);
+        let session = Arc::new(RawSftpSession::new_with_config(
+            client,
+            Config {
+                request_timeout_secs: 0,
+                ..Config::default()
+            },
+        ));
+        let mut file = File::new(session, "handle".to_string(), test_features());
+
+        file.write_all(b"payload")
+            .await
+            .expect("write should queue without waiting for acknowledgement");
+        let error = file
+            .shutdown()
+            .await
+            .expect_err("shutdown should time out while draining the write acknowledgement");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "Timeout");
+    }
+
+    #[tokio::test]
+    async fn dropping_file_while_close_ack_is_pending_does_not_send_duplicate_close() {
+        use std::{future::Future, task::Context, time::Duration};
+
+        use futures::task::noop_waker;
+
+        use crate::protocol::Packet;
+
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session = Arc::new(RawSftpSession::new(client));
+        let mut file = File::new(session, "handle".to_string(), test_features());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        {
+            let mut shutdown = Box::pin(file.shutdown());
+            assert!(shutdown.as_mut().poll(&mut context).is_pending());
+        }
+
+        let mut packet = crate::utils::read_packet(&mut server, u32::MAX)
+            .await
+            .expect("server should receive close");
+        assert!(matches!(
+            Packet::try_from(&mut packet),
+            Ok(Packet::Close(_))
+        ));
+        drop(file);
+
+        let next = tokio::time::timeout(
+            Duration::from_millis(50),
+            crate::utils::read_packet(&mut server, u32::MAX),
+        )
+        .await;
+        assert!(!matches!(next, Ok(Ok(_))));
+    }
+}
