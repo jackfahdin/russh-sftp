@@ -7,7 +7,7 @@ mod session;
 
 pub use handler::Handler;
 pub use rawsession::RawSftpSession;
-pub use session::SftpSession;
+pub use session::{LimitedReadDir, SftpSession};
 
 use bytes::Bytes;
 use std::sync::Arc;

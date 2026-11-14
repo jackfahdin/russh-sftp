@@ -124,3 +124,20 @@ Validation is on Windows; native macOS/Linux checks are delegated to the
 branch workflow. Interactive GUI/file-drop and real-server authentication
 checks were not performed by this update. Their outcomes must not be inferred
 from scripted peers or compile checks.
+
+## Bounded directory enumeration for NyaTerm PR #1251
+
+Adds `SftpSession::read_dir_bytes_limited(path, max_entries, max_name_bytes)`.
+It stops issuing READDIR at either budget and reports completeness only after
+EOF. It retains at most the requested entries/name bytes plus one incoming
+packet bounded by Config. It does not change the existing read_dir APIs.
+A directory guard uses the existing tracked CLOSE machinery on cancellation
+and errors. An owned OPENDIR response task closes a late handle even when the
+caller has already cancelled; its wait remains subject to the request timeout.
+
+Linux validation: `cargo test --lib` (23 passed),
+`cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`.
+Regression peers cover entry/byte limits, EOF, cancellation during READDIR,
+cancellation before OPENDIR replies, and directory errors. Existing tests
+cover pending CLOSE cancellation and handle-count release. No real-server or
+macOS/Windows interactive verification is claimed by this patch.

@@ -1,3 +1,6 @@
+mod limited_dir;
+pub use limited_dir::LimitedReadDir;
+
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
