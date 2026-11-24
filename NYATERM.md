@@ -1,5 +1,15 @@
 # NyaTerm fork notes
 
+## Upstream synchronization (2026-11-25)
+
+- Upstream base: `dc679c048fdd527def370fc5269af6f357c685c3` (AspectUnk/russh-sftp, master).
+- Previous published head: `e2c3affd010e680556b1d1adc86d58d910075f4b`.
+- Preserved remote backup: `backup/nyaterm-20261125-e2c3affd`.
+
+Use upstream SftpString and SftpHandle contracts, enabling raw-string by default. Replace the old raw-path storage patch with compatibility byte-path adapters. Preserve byte-exact paths, POSIX rename, OpenSSH symlink ordering, positional reads, bounded directory enumeration and cancelled-handle ownership. Keep upstream queue-aware response timers and 32-bit atomics alongside prompt transport failure and tracked CLOSE cleanup. Legacy write_bytes retains its non-truncating behavior; upstream write retains create-and-truncate semantics.
+
+Linux x86_64, Rust 1.99.1: 42 library tests passed, including non-UTF-8 adapter payloads, non-truncating byte writes, bounded enumeration, cancellation and queue-timeout tests. All-target check and Clippy passed; no-default-features check and formatting passed. Real SFTP servers and Windows/macOS were not exercised.
+
 This branch carries [NyaTerm](https://github.com/nyakang/nyaterm)'s local changes
 to `russh-sftp` on top of an unmodified upstream base.
 

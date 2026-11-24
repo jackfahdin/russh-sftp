@@ -56,12 +56,21 @@ impl Iterator for ReadDir {
     fn next(&mut self) -> Option<Self::Item> {
         match self.entries.pop_front() {
             None => None,
-            Some(entry) if entry.0 == b"." || entry.0 == b".." => self.next(),
+            Some(entry) if entry.0.as_bytes() == b"." || entry.0.as_bytes() == b".." => self.next(),
             Some(entry) => Some(DirEntry {
                 parent: self.parent.clone(),
                 file: entry.0,
                 metadata: entry.1,
             }),
         }
+    }
+}
+
+impl DirEntry {
+    pub fn file_name_bytes(&self) -> &[u8] {
+        self.file.as_bytes()
+    }
+    pub fn path_bytes(&self) -> Vec<u8> {
+        self.path().into_bytes()
     }
 }

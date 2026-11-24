@@ -43,6 +43,7 @@ futures = "0.3.34"
 rand = "0.10.4"
 
 [features]
+default = ["raw-string"]
 async-trait = ["dep:async-trait"]
 raw-string = []
 

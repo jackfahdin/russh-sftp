@@ -277,7 +277,12 @@ impl RawSftpSession {
         let timeout = AtomicU32::new(u32::try_from(cfg.request_timeout_secs).unwrap_or(u32::MAX));
 
         Self {
-            tx: run_outgoing(stream, inner, cfg, Arc::new(move |error| fail_all_pending_requests(&fail_requests, error))),
+            tx: run_outgoing(
+                stream,
+                inner,
+                cfg,
+                Arc::new(move |error| fail_all_pending_requests(&fail_requests, error)),
+            ),
             written: Arc::default(),
             requests: req_map,
             closed,
@@ -427,7 +432,7 @@ impl RawSftpSession {
                 Some(id),
                 Open {
                     id,
-                    filename,
+                    filename: filename.into(),
                     pflags: flags,
                     attrs,
                 }
@@ -583,7 +588,16 @@ impl RawSftpSession {
 
     pub async fn lstat<P: Into<SftpString>>(&self, path: P) -> SftpResult<Attrs> {
         let id = self.use_next_id();
-        let result = self.request(Some(id), Lstat { id, path }.into()).await?;
+        let result = self
+            .request(
+                Some(id),
+                Lstat {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
 
         into_with_status!(result, Attrs)
     }
@@ -611,7 +625,15 @@ impl RawSftpSession {
     ) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(Some(id), SetStat { id, path, attrs }.into())
+            .request(
+                Some(id),
+                SetStat {
+                    id,
+                    path: path.into(),
+                    attrs,
+                }
+                .into(),
+            )
             .await?;
 
         into_status!(result)
@@ -648,7 +670,16 @@ impl RawSftpSession {
         }
 
         let id = self.use_next_id();
-        let result = self.request(Some(id), OpenDir { id, path }.into()).await?;
+        let result = self
+            .request(
+                Some(id),
+                OpenDir {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
 
         if let Packet::Handle(_) = result {
             self.handles.fetch_add(1, Ordering::SeqCst);
@@ -676,7 +707,14 @@ impl RawSftpSession {
     pub async fn remove<T: Into<SftpString>>(&self, filename: T) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(Some(id), Remove { id, filename }.into())
+            .request(
+                Some(id),
+                Remove {
+                    id,
+                    filename: filename.into(),
+                }
+                .into(),
+            )
             .await?;
 
         into_status!(result)
@@ -689,7 +727,15 @@ impl RawSftpSession {
     ) -> SftpResult<Status> {
         let id = self.use_next_id();
         let result = self
-            .request(Some(id), MkDir { id, path, attrs }.into())
+            .request(
+                Some(id),
+                MkDir {
+                    id,
+                    path: path.into(),
+                    attrs,
+                }
+                .into(),
+            )
             .await?;
 
         into_status!(result)
@@ -697,21 +743,48 @@ impl RawSftpSession {
 
     pub async fn rmdir<P: Into<SftpString>>(&self, path: P) -> SftpResult<Status> {
         let id = self.use_next_id();
-        let result = self.request(Some(id), RmDir { id, path }.into()).await?;
+        let result = self
+            .request(
+                Some(id),
+                RmDir {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
 
         into_status!(result)
     }
 
     pub async fn realpath<P: Into<SftpString>>(&self, path: P) -> SftpResult<Name> {
         let id = self.use_next_id();
-        let result = self.request(Some(id), RealPath { id, path }.into()).await?;
+        let result = self
+            .request(
+                Some(id),
+                RealPath {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
 
         into_with_status!(result, Name)
     }
 
     pub async fn stat<P: Into<SftpString>>(&self, path: P) -> SftpResult<Attrs> {
         let id = self.use_next_id();
-        let result = self.request(Some(id), Stat { id, path }.into()).await?;
+        let result = self
+            .request(
+                Some(id),
+                Stat {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
 
         into_with_status!(result, Attrs)
     }
@@ -727,8 +800,8 @@ impl RawSftpSession {
                 Some(id),
                 Rename {
                     id,
-                    oldpath,
-                    newpath,
+                    oldpath: oldpath.into(),
+                    newpath: newpath.into(),
                 }
                 .into(),
             )
@@ -742,10 +815,30 @@ impl RawSftpSession {
         let result = self
             .request(
                 Some(id),
+                ReadLink {
+                    id,
+                    path: path.into(),
+                }
+                .into(),
+            )
+            .await?;
+
+        into_with_status!(result, Name)
+    }
+
+    pub async fn symlink<P, T>(&self, path: P, target: T) -> SftpResult<Status>
+    where
+        P: Into<SftpString>,
+        T: Into<SftpString>,
+    {
+        let id = self.use_next_id();
+        let result = self
+            .request(
+                Some(id),
                 Symlink {
                     id,
-                    linkpath: path,
-                    targetpath: target,
+                    linkpath: path.into(),
+                    targetpath: target.into(),
                 }
                 .into(),
             )
@@ -756,13 +849,13 @@ impl RawSftpSession {
 
     pub async fn symlink_openssh<T, L>(&self, target: T, link: L) -> SftpResult<Status>
     where
-        P: Into<SftpString>,
         T: Into<SftpString>,
+        L: Into<SftpString>,
     {
-        self.symlink_openssh_bytes(target.into().into_bytes(), link.into().into_bytes())
-            .await
+        self.symlink(target, link).await
     }
 
+    #[cfg(feature = "raw-string")]
     pub async fn symlink_openssh_bytes(
         &self,
         target: Vec<u8>,
@@ -774,8 +867,8 @@ impl RawSftpSession {
                 Some(id),
                 Symlink {
                     id,
-                    linkpath: target,
-                    targetpath: link,
+                    linkpath: target.into(),
+                    targetpath: link.into(),
                 }
                 .into(),
             )
@@ -902,6 +995,51 @@ impl RawSftpSession {
 impl Drop for RawSftpSession {
     fn drop(&mut self) {
         let _ = self.close_session();
+    }
+}
+
+#[cfg(feature = "raw-string")]
+impl RawSftpSession {
+    pub async fn lstat_bytes(&self, path: Vec<u8>) -> SftpResult<Attrs> {
+        self.lstat(path).await
+    }
+    pub async fn opendir_bytes(&self, path: Vec<u8>) -> SftpResult<Handle> {
+        self.opendir(path).await
+    }
+    pub async fn remove_bytes(&self, path: Vec<u8>) -> SftpResult<Status> {
+        self.remove(path).await
+    }
+    pub async fn rmdir_bytes(&self, path: Vec<u8>) -> SftpResult<Status> {
+        self.rmdir(path).await
+    }
+    pub async fn realpath_bytes(&self, path: Vec<u8>) -> SftpResult<Name> {
+        self.realpath(path).await
+    }
+    pub async fn stat_bytes(&self, path: Vec<u8>) -> SftpResult<Attrs> {
+        self.stat(path).await
+    }
+    pub async fn readlink_bytes(&self, path: Vec<u8>) -> SftpResult<Name> {
+        self.readlink(path).await
+    }
+    pub async fn rename_bytes(&self, first: Vec<u8>, second: Vec<u8>) -> SftpResult<Status> {
+        self.rename(first, second).await
+    }
+    pub async fn symlink_bytes(&self, first: Vec<u8>, second: Vec<u8>) -> SftpResult<Status> {
+        self.symlink(first, second).await
+    }
+    pub async fn open_bytes(
+        &self,
+        path: Vec<u8>,
+        flags: OpenFlags,
+        attrs: FileAttributes,
+    ) -> SftpResult<Handle> {
+        self.open(path, flags, attrs).await
+    }
+    pub async fn mkdir_bytes(&self, path: Vec<u8>, attrs: FileAttributes) -> SftpResult<Status> {
+        self.mkdir(path, attrs).await
+    }
+    pub async fn setstat_bytes(&self, path: Vec<u8>, attrs: FileAttributes) -> SftpResult<Status> {
+        self.setstat(path, attrs).await
     }
 }
 

@@ -312,7 +312,7 @@ impl Drop for File {
         }
 
         let handle = std::mem::take(&mut self.handle);
-        if !handle.is_empty() {
+        if !handle.as_bytes().is_empty() {
             self.session.close_detached(handle);
         }
     }
@@ -515,7 +515,7 @@ impl AsyncWrite for File {
         if poll.is_ready() {
             self.state.f_shutdown = None;
             self.closed = true;
-            self.handle.clear();
+            self.handle = Default::default();
         }
 
         poll
@@ -556,7 +556,7 @@ mod tests {
                 ..Config::default()
             },
         ));
-        let mut file = File::new(session, "handle".to_string(), test_features());
+        let mut file = File::new(session, "handle".into(), test_features());
 
         file.write_all(b"payload")
             .await
@@ -580,7 +580,7 @@ mod tests {
 
         let (client, mut server) = tokio::io::duplex(4096);
         let session = Arc::new(RawSftpSession::new(client));
-        let mut file = File::new(session, "handle".to_string(), test_features());
+        let mut file = File::new(session, "handle".into(), test_features());
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
         {
