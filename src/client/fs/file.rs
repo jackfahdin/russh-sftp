@@ -16,7 +16,7 @@ use crate::{
         session::Features,
         RawSftpSession,
     },
-    protocol::{Packet, StatusCode},
+    protocol::{Packet, SftpHandle, StatusCode},
 };
 
 type StateFn<T> = Option<Pin<Box<dyn Future<Output = io::Result<T>> + Send + Sync + 'static>>>;
@@ -44,6 +44,8 @@ impl ReadState {
         self.pos = 0;
         self.offset = offset;
         self.eof = false;
+        // A short read near EOF must not limit later reads
+        self.chunk_len = None;
     }
 
     fn poll_read(
@@ -51,7 +53,7 @@ impl ReadState {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
         session: &RawSftpSession,
-        handle: &str,
+        handle: &SftpHandle,
         features: Features,
     ) -> Poll<io::Result<usize>> {
         if buf.remaining() == 0 {
@@ -103,7 +105,7 @@ impl ReadState {
     fn request(
         &mut self,
         session: &RawSftpSession,
-        handle: &str,
+        handle: &SftpHandle,
         features: Features,
     ) -> io::Result<()> {
         let max_len = features.max_packet_len.saturating_sub(READ_OVERHEAD_LENGTH) as u64;
@@ -163,7 +165,7 @@ struct FileState {
 /// request the actual file size from the remote server.
 pub struct File {
     session: Arc<RawSftpSession>,
-    handle: String,
+    handle: SftpHandle,
     state: FileState,
     pos: u64,
     closed: bool,
@@ -171,7 +173,11 @@ pub struct File {
 }
 
 impl File {
-    pub(crate) fn new(session: Arc<RawSftpSession>, handle: String, features: Features) -> Self {
+    pub(crate) fn new(
+        session: Arc<RawSftpSession>,
+        handle: SftpHandle,
+        features: Features,
+    ) -> Self {
         Self {
             session,
             handle,
@@ -193,13 +199,13 @@ impl File {
 
     /// Queries metadata about the remote file.
     pub async fn metadata(&self) -> SftpResult<Metadata> {
-        Ok(self.session.fstat(self.handle.as_str()).await?.attrs)
+        Ok(self.session.fstat(self.handle.clone()).await?.attrs)
     }
 
     /// Sets metadata for a remote file.
     pub async fn set_metadata(&self, metadata: Metadata) -> SftpResult<()> {
         self.session
-            .fsetstat(self.handle.as_str(), metadata)
+            .fsetstat(self.handle.clone(), metadata)
             .await
             .map(|_| ())
     }
@@ -213,7 +219,7 @@ impl File {
             return Ok(());
         }
 
-        self.session.fsync(self.handle.as_str()).await.map(|_| ())
+        self.session.fsync(self.handle.clone()).await.map(|_| ())
     }
 
     /// Reads data at `offset` without changing the sequential stream position.
@@ -306,7 +312,7 @@ impl Drop for File {
         }
 
         let handle = std::mem::take(&mut self.handle);
-        if !handle.is_empty() {
+        if !handle.as_bytes().is_empty() {
             self.session.close_detached(handle);
         }
     }
@@ -407,7 +413,7 @@ impl AsyncWrite for File {
         let packet_write_len = self
             .features
             .max_packet_len
-            .saturating_sub(WRITE_OVERHEAD_LENGTH + self.handle.len() as u32)
+            .saturating_sub(WRITE_OVERHEAD_LENGTH + self.handle.as_bytes().len() as u32)
             as usize;
         let server_write_len = self
             .features
@@ -418,7 +424,7 @@ impl AsyncWrite for File {
         let preferred_write_len = self
             .features
             .max_write_packet_len
-            .saturating_sub(WRITE_OVERHEAD_LENGTH + self.handle.len() as u32)
+            .saturating_sub(WRITE_OVERHEAD_LENGTH + self.handle.as_bytes().len() as u32)
             .max(1) as usize;
 
         let len = buf
@@ -436,7 +442,7 @@ impl AsyncWrite for File {
 
         match self
             .session
-            .write_nowait_from_slice(self.handle.as_str(), offset, &buf[..len])
+            .write_nowait_from_slice(self.handle.as_bytes(), offset, &buf[..len])
         {
             Ok(rx) => {
                 self.pos += len as u64;
@@ -509,7 +515,7 @@ impl AsyncWrite for File {
         if poll.is_ready() {
             self.state.f_shutdown = None;
             self.closed = true;
-            self.handle.clear();
+            self.handle = Default::default();
         }
 
         poll
@@ -550,7 +556,7 @@ mod tests {
                 ..Config::default()
             },
         ));
-        let mut file = File::new(session, "handle".to_string(), test_features());
+        let mut file = File::new(session, "handle".into(), test_features());
 
         file.write_all(b"payload")
             .await
@@ -574,7 +580,7 @@ mod tests {
 
         let (client, mut server) = tokio::io::duplex(4096);
         let session = Arc::new(RawSftpSession::new(client));
-        let mut file = File::new(session, "handle".to_string(), test_features());
+        let mut file = File::new(session, "handle".into(), test_features());
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
         {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::SftpSession;
 use crate::client::{error::Error, fs::ReadDir, rawsession::SftpResult, runtime, RawSftpSession};
-use crate::protocol::StatusCode;
+use crate::protocol::{SftpHandle, StatusCode};
 
 /// `complete` is true only after EOF; reaching a budget does not probe for EOF.
 pub struct LimitedReadDir {
@@ -13,7 +13,7 @@ pub struct LimitedReadDir {
 
 struct DirectoryHandle {
     session: Arc<RawSftpSession>,
-    handle: Option<String>,
+    handle: Option<SftpHandle>,
 }
 
 impl DirectoryHandle {
@@ -50,7 +50,7 @@ impl SftpSession {
         let path = path.into();
         let mut result = LimitedReadDir {
             entries: ReadDir {
-                parent: Arc::from(path.as_slice()),
+                parent: Arc::new(path.clone().into()),
                 entries: Default::default(),
             },
             complete: false,
@@ -79,7 +79,7 @@ impl SftpSession {
         'listing: loop {
             match directory
                 .session
-                .readdir(directory.handle.as_deref().expect("open directory"))
+                .readdir(directory.handle.as_ref().expect("open directory").clone())
                 .await
             {
                 Ok(name) => {

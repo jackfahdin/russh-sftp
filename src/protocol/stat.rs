@@ -1,11 +1,10 @@
-use super::{impl_packet_for, impl_request_id, Packet, RequestId};
+use super::{impl_packet_for, impl_request_id, Packet, RequestId, SftpString};
 
 /// Implementation for `SSH_FXP_STAT`
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Stat {
     pub id: u32,
-    #[serde(with = "serde_bytes")]
-    pub path: Vec<u8>,
+    pub path: SftpString,
 }
 
 impl_request_id!(Stat);

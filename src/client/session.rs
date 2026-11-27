@@ -1,4 +1,6 @@
+#[cfg(feature = "raw-string")]
 mod limited_dir;
+#[cfg(feature = "raw-string")]
 pub use limited_dir::LimitedReadDir;
 
 use std::sync::Arc;
@@ -13,13 +15,13 @@ use super::{
 use crate::{
     client::Config,
     extensions::{self, Statvfs},
-    protocol::{FileAttributes, OpenFlags, StatusCode},
+    protocol::{FileAttributes, OpenFlags, SftpString, StatusCode},
 };
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Features {
-    pub posix_rename: bool,
     pub hardlink: bool,
+    pub posix_rename: bool,
     pub fsync: bool,
     pub statvfs: bool,
     pub expand_path: bool,
@@ -61,8 +63,8 @@ impl SftpSession {
         let has_extension = |name, ver| version.extensions.get(name).is_some_and(|v| v == ver);
 
         let mut features = Features {
-            posix_rename: has_extension("posix-rename@openssh.com", "1"),
             hardlink: has_extension(extensions::HARDLINK, "1"),
+            posix_rename: has_extension(extensions::POSIX_RENAME, "1"),
             fsync: has_extension(extensions::FSYNC, "1"),
             statvfs: has_extension(extensions::STATVFS, "2"),
             expand_path: has_extension(extensions::EXPAND_PATH, "1"),
@@ -116,27 +118,15 @@ impl SftpSession {
     }
 
     /// Attempts to open a file in read-only mode.
-    pub async fn open<T: Into<String>>(&self, filename: T) -> SftpResult<File> {
-        self.open_bytes(filename.into().into_bytes()).await
-    }
-
-    /// Attempts to open a file in read-only mode using raw SFTP path bytes.
-    pub async fn open_bytes(&self, filename: Vec<u8>) -> SftpResult<File> {
-        self.open_with_flags_bytes(filename, OpenFlags::READ).await
+    pub async fn open<T: Into<SftpString>>(&self, filename: T) -> SftpResult<File> {
+        self.open_with_flags(filename, OpenFlags::READ).await
     }
 
     /// Opens a file in write-only mode.
     ///
     /// This function will create a file if it does not exist, and will truncate it if it does.
-    pub async fn create<T: Into<String>>(&self, filename: T) -> SftpResult<File> {
-        self.create_bytes(filename.into().into_bytes()).await
-    }
-
-    /// Opens a file in write-only mode using raw SFTP path bytes.
-    ///
-    /// This function will create a file if it does not exist, and will truncate it if it does.
-    pub async fn create_bytes(&self, filename: Vec<u8>) -> SftpResult<File> {
-        self.open_with_flags_bytes(
+    pub async fn create<T: Into<SftpString>>(&self, filename: T) -> SftpResult<File> {
+        self.open_with_flags(
             filename,
             OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
         )
@@ -144,62 +134,29 @@ impl SftpSession {
     }
 
     /// Attempts to open or create the file in the specified mode
-    pub async fn open_with_flags<T: Into<String>>(
+    pub async fn open_with_flags<T: Into<SftpString>>(
         &self,
         filename: T,
         flags: OpenFlags,
     ) -> SftpResult<File> {
-        self.open_with_flags_bytes(filename.into().into_bytes(), flags)
-            .await
-    }
-
-    /// Attempts to open or create the file in the specified mode using raw SFTP path bytes.
-    pub async fn open_with_flags_bytes(
-        &self,
-        filename: Vec<u8>,
-        flags: OpenFlags,
-    ) -> SftpResult<File> {
-        self.open_with_flags_and_attributes_bytes(filename, flags, FileAttributes::empty())
+        self.open_with_flags_and_attributes(filename, flags, FileAttributes::empty())
             .await
     }
 
     /// Attempts to open or create the file in the specified mode and with specified file attributes
-    pub async fn open_with_flags_and_attributes<T: Into<String>>(
+    pub async fn open_with_flags_and_attributes<T: Into<SftpString>>(
         &self,
         filename: T,
         flags: OpenFlags,
         attributes: FileAttributes,
     ) -> SftpResult<File> {
-        self.open_with_flags_and_attributes_bytes(filename.into().into_bytes(), flags, attributes)
-            .await
-    }
-
-    /// Attempts to open or create the file in the specified mode and with specified file
-    /// attributes using raw SFTP path bytes.
-    pub async fn open_with_flags_and_attributes_bytes(
-        &self,
-        filename: Vec<u8>,
-        flags: OpenFlags,
-        attributes: FileAttributes,
-    ) -> SftpResult<File> {
-        let handle = self
-            .session
-            .open_bytes(filename, flags, attributes)
-            .await?
-            .handle;
+        let handle = self.session.open(filename, flags, attributes).await?.handle;
         Ok(File::new(self.session.clone(), handle, self.features))
     }
 
     /// Requests the remote party for the absolute from the relative path.
-    pub async fn canonicalize<T: Into<String>>(&self, path: T) -> SftpResult<String> {
-        let path = self.canonicalize_bytes(path.into().into_bytes()).await?;
-        Ok(String::from_utf8_lossy(&path).into_owned())
-    }
-
-    /// Requests the remote party for the absolute from the relative path using raw SFTP path
-    /// bytes, returning raw bytes from the server.
-    pub async fn canonicalize_bytes<T: Into<Vec<u8>>>(&self, path: T) -> SftpResult<Vec<u8>> {
-        let name = self.session.realpath_bytes(path.into()).await?;
+    pub async fn canonicalize<T: Into<SftpString>>(&self, path: T) -> SftpResult<SftpString> {
+        let name = self.session.realpath(path).await?;
         match name.files.first() {
             Some(file) => Ok(file.filename.to_owned()),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
@@ -207,26 +164,16 @@ impl SftpSession {
     }
 
     /// Creates a new empty directory.
-    pub async fn create_dir<T: Into<String>>(&self, path: T) -> SftpResult<()> {
-        self.create_dir_bytes(path.into().into_bytes()).await
-    }
-
-    /// Creates a new empty directory using raw SFTP path bytes.
-    pub async fn create_dir_bytes<T: Into<Vec<u8>>>(&self, path: T) -> SftpResult<()> {
+    pub async fn create_dir<T: Into<SftpString>>(&self, path: T) -> SftpResult<()> {
         self.session
-            .mkdir_bytes(path.into(), FileAttributes::empty())
+            .mkdir(path, FileAttributes::empty())
             .await
             .map(|_| ())
     }
 
     /// Reads the contents of a file located at the specified path to the end.
-    pub async fn read<P: Into<String>>(&self, path: P) -> SftpResult<Vec<u8>> {
-        self.read_bytes(path.into().into_bytes()).await
-    }
-
-    /// Reads the contents of a file located at the specified raw SFTP path bytes to the end.
-    pub async fn read_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Vec<u8>> {
-        let mut file = self.open_bytes(path.into()).await?;
+    pub async fn read<P: Into<SftpString>>(&self, path: P) -> SftpResult<Vec<u8>> {
+        let mut file = self.open(path).await?;
         let mut buffer = Vec::new();
 
         file.read_to_end(&mut buffer).await?;
@@ -236,15 +183,10 @@ impl SftpSession {
     }
 
     /// Writes the contents to a file whose path is specified.
-    pub async fn write<P: Into<String>>(&self, path: P, data: &[u8]) -> SftpResult<()> {
-        self.write_bytes(path.into().into_bytes(), data).await
-    }
-
-    /// Writes the contents to a file whose raw SFTP path bytes are specified.
-    pub async fn write_bytes<P: Into<Vec<u8>>>(&self, path: P, data: &[u8]) -> SftpResult<()> {
-        let mut file = self
-            .open_with_flags_bytes(path.into(), OpenFlags::WRITE)
-            .await?;
+    ///
+    /// This function will create a file if it does not exist, and will truncate it if it does.
+    pub async fn write<P: Into<SftpString>>(&self, path: P, data: &[u8]) -> SftpResult<()> {
+        let mut file = self.create(path).await?;
         file.write_all(data).await?;
         file.flush().await?;
         file.close().await?;
@@ -252,13 +194,8 @@ impl SftpSession {
     }
 
     /// Checks a file or folder exists at the specified path
-    pub async fn try_exists<P: Into<String>>(&self, path: P) -> SftpResult<bool> {
-        self.try_exists_bytes(path.into().into_bytes()).await
-    }
-
-    /// Checks a file or folder exists at the specified raw SFTP path bytes.
-    pub async fn try_exists_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<bool> {
-        match self.metadata_bytes(path).await {
+    pub async fn try_exists<P: Into<SftpString>>(&self, path: P) -> SftpResult<bool> {
+        match self.metadata(path).await {
             Ok(_) => Ok(true),
             Err(Error::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(false),
             Err(error) => Err(error),
@@ -266,30 +203,21 @@ impl SftpSession {
     }
 
     /// Returns an iterator over the entries within a directory.
-    pub async fn read_dir<P: Into<String>>(&self, path: P) -> SftpResult<ReadDir> {
-        self.read_dir_bytes(path.into().into_bytes()).await
-    }
+    pub async fn read_dir<P: Into<SftpString>>(&self, path: P) -> SftpResult<ReadDir> {
+        let path: SftpString = path.into();
+        let parent = Arc::new(path.clone());
 
-    /// Returns an iterator over the entries within a directory using raw SFTP path bytes.
-    pub async fn read_dir_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<ReadDir> {
-        let path: Vec<u8> = path.into();
-        let parent = Arc::from(path.as_slice());
-
-        let handle = self.session.opendir_bytes(path).await?.handle;
+        let handle = self.session.opendir(path).await?.handle;
         let mut files = vec![];
 
         loop {
-            match self.session.readdir(handle.as_str()).await {
-                Ok(name) => {
-                    files = name
-                        .files
-                        .into_iter()
-                        .map(|f| (f.filename, f.attrs))
-                        .chain(files)
-                        .collect();
-                }
+            match self.session.readdir(handle.clone()).await {
+                Ok(name) => files.extend(name.files.into_iter().map(|f| (f.filename, f.attrs))),
                 Err(Error::Status(status)) if status.status_code == StatusCode::Eof => break,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let _ = self.session.close_nowait(handle);
+                    return Err(err);
+                }
             }
         }
 
@@ -302,14 +230,8 @@ impl SftpSession {
     }
 
     /// Reads a symbolic link, returning the file that the link points to.
-    pub async fn read_link<P: Into<String>>(&self, path: P) -> SftpResult<String> {
-        let path = self.read_link_bytes(path.into().into_bytes()).await?;
-        Ok(String::from_utf8_lossy(&path).into_owned())
-    }
-
-    /// Reads a symbolic link using raw SFTP path bytes, returning raw bytes from the server.
-    pub async fn read_link_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Vec<u8>> {
-        let name = self.session.readlink_bytes(path.into()).await?;
+    pub async fn read_link<P: Into<SftpString>>(&self, path: P) -> SftpResult<SftpString> {
+        let name = self.session.readlink(path).await?;
         match name.files.first() {
             Some(file) => Ok(file.filename.to_owned()),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
@@ -317,36 +239,26 @@ impl SftpSession {
     }
 
     /// Removes the specified folder.
-    pub async fn remove_dir<P: Into<String>>(&self, path: P) -> SftpResult<()> {
-        self.remove_dir_bytes(path.into().into_bytes()).await
-    }
-
-    /// Removes the specified folder using raw SFTP path bytes.
-    pub async fn remove_dir_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<()> {
-        self.session.rmdir_bytes(path.into()).await.map(|_| ())
+    pub async fn remove_dir<P: Into<SftpString>>(&self, path: P) -> SftpResult<()> {
+        self.session.rmdir(path).await.map(|_| ())
     }
 
     /// Removes the specified file.
-    pub async fn remove_file<T: Into<String>>(&self, filename: T) -> SftpResult<()> {
-        self.remove_file_bytes(filename.into().into_bytes()).await
-    }
-
-    /// Removes the specified file using raw SFTP path bytes.
-    pub async fn remove_file_bytes<T: Into<Vec<u8>>>(&self, filename: T) -> SftpResult<()> {
-        self.session.remove_bytes(filename.into()).await.map(|_| ())
+    pub async fn remove_file<T: Into<SftpString>>(&self, filename: T) -> SftpResult<()> {
+        self.session.remove(filename).await.map(|_| ())
     }
 
     /// Rename a file or directory to a new name.
     pub async fn rename<O, N>(&self, oldpath: O, newpath: N) -> SftpResult<()>
     where
-        O: Into<String>,
-        N: Into<String>,
+        O: Into<SftpString>,
+        N: Into<SftpString>,
     {
-        self.rename_bytes(oldpath.into().into_bytes(), newpath.into().into_bytes())
-            .await
+        self.session.rename(oldpath, newpath).await.map(|_| ())
     }
 
     /// Rename a file or directory to a new name using raw SFTP path bytes.
+    #[cfg(feature = "raw-string")]
     pub async fn rename_bytes<O, N>(&self, oldpath: O, newpath: N) -> SftpResult<()>
     where
         O: Into<Vec<u8>>,
@@ -360,6 +272,7 @@ impl SftpSession {
 
     /// Atomically replace a destination using the OpenSSH POSIX rename extension.
     /// Unsupported servers fail without deleting or modifying either path.
+    #[cfg(feature = "raw-string")]
     pub async fn posix_rename_bytes(&self, oldpath: Vec<u8>, newpath: Vec<u8>) -> SftpResult<()> {
         if !self.features.posix_rename {
             return Err(Error::UnexpectedBehavior(
@@ -383,14 +296,14 @@ impl SftpSession {
     /// Creates a symlink of the specified target.
     pub async fn symlink<P, T>(&self, path: P, target: T) -> SftpResult<()>
     where
-        P: Into<String>,
-        T: Into<String>,
+        P: Into<SftpString>,
+        T: Into<SftpString>,
     {
-        self.symlink_bytes(path.into().into_bytes(), target.into().into_bytes())
-            .await
+        self.session.symlink(path, target).await.map(|_| ())
     }
 
     /// Creates a symlink of the specified target using raw SFTP path bytes.
+    #[cfg(feature = "raw-string")]
     pub async fn symlink_bytes<P, T>(&self, path: P, target: T) -> SftpResult<()>
     where
         P: Into<Vec<u8>>,
@@ -408,14 +321,14 @@ impl SftpSession {
     /// which is the reverse of the order documented by the old draft protocol.
     pub async fn symlink_openssh<T, L>(&self, target: T, link: L) -> SftpResult<()>
     where
-        T: Into<String>,
-        L: Into<String>,
+        T: Into<SftpString>,
+        L: Into<SftpString>,
     {
-        self.symlink_openssh_bytes(target.into().into_bytes(), link.into().into_bytes())
-            .await
+        self.session.symlink_openssh(target, link).await.map(|_| ())
     }
 
     /// Creates an OpenSSH-ordered symlink using raw SFTP path bytes.
+    #[cfg(feature = "raw-string")]
     pub async fn symlink_openssh_bytes<T, L>(&self, target: T, link: L) -> SftpResult<()>
     where
         T: Into<Vec<u8>>,
@@ -428,49 +341,27 @@ impl SftpSession {
     }
 
     /// Queries metadata about the remote file.
-    pub async fn metadata<P: Into<String>>(&self, path: P) -> SftpResult<Metadata> {
-        self.metadata_bytes(path.into().into_bytes()).await
-    }
-
-    /// Queries metadata about the remote file using raw SFTP path bytes.
-    pub async fn metadata_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Metadata> {
-        Ok(self.session.stat_bytes(path.into()).await?.attrs)
+    pub async fn metadata<P: Into<SftpString>>(&self, path: P) -> SftpResult<Metadata> {
+        Ok(self.session.stat(path).await?.attrs)
     }
 
     /// Sets metadata for a remote file.
-    pub async fn set_metadata<P: Into<String>>(
+    pub async fn set_metadata<P: Into<SftpString>>(
         &self,
         path: P,
         metadata: Metadata,
     ) -> Result<(), Error> {
-        self.set_metadata_bytes(path.into().into_bytes(), metadata)
-            .await
+        self.session.setstat(path, metadata).await.map(|_| ())
     }
 
-    /// Sets metadata for a remote file using raw SFTP path bytes.
-    pub async fn set_metadata_bytes<P: Into<Vec<u8>>>(
-        &self,
-        path: P,
-        metadata: Metadata,
-    ) -> Result<(), Error> {
-        self.session
-            .setstat_bytes(path.into(), metadata)
-            .await
-            .map(|_| ())
-    }
-
-    pub async fn symlink_metadata<P: Into<String>>(&self, path: P) -> SftpResult<Metadata> {
-        self.symlink_metadata_bytes(path.into().into_bytes()).await
-    }
-
-    pub async fn symlink_metadata_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Metadata> {
-        Ok(self.session.lstat_bytes(path.into()).await?.attrs)
+    pub async fn symlink_metadata<P: Into<SftpString>>(&self, path: P) -> SftpResult<Metadata> {
+        Ok(self.session.lstat(path).await?.attrs)
     }
 
     pub async fn hardlink<O, N>(&self, oldpath: O, newpath: N) -> SftpResult<bool>
     where
-        O: Into<String>,
-        N: Into<String>,
+        O: Into<SftpString>,
+        N: Into<SftpString>,
     {
         if !self.features.hardlink {
             return Ok(false);
@@ -479,9 +370,26 @@ impl SftpSession {
         self.session.hardlink(oldpath, newpath).await.map(|_| true)
     }
 
+    /// Rename a file or directory to a new name, atomically replacing the destination if it exists.
+    /// Returns `Ok(false)` if the remote SFTP server does not support `posix-rename@openssh.com` extension v1.
+    pub async fn posix_rename<O, N>(&self, oldpath: O, newpath: N) -> SftpResult<bool>
+    where
+        O: Into<SftpString>,
+        N: Into<SftpString>,
+    {
+        if !self.features.posix_rename {
+            return Ok(false);
+        }
+
+        self.session
+            .posix_rename(oldpath, newpath)
+            .await
+            .map(|_| true)
+    }
+
     /// Performs a statvfs on the remote file system path.
     /// Returns `Ok(None)` if the remote SFTP server does not support `statvfs@openssh.com` extension v2.
-    pub async fn fs_info<P: Into<String>>(&self, path: P) -> SftpResult<Option<Statvfs>> {
+    pub async fn fs_info<P: Into<SftpString>>(&self, path: P) -> SftpResult<Option<Statvfs>> {
         if !self.features.statvfs {
             return Ok(None);
         }
@@ -491,25 +399,15 @@ impl SftpSession {
 
     /// Expands a `~`/`~user`-prefixed or relative path and returns its canonicalized absolute form.
     /// Returns `Ok(None)` if the remote SFTP server does not support `expand-path@openssh.com` extension v1.
-    pub async fn expand_path<P: Into<String>>(&self, path: P) -> SftpResult<Option<String>> {
-        let expanded = self.expand_path_bytes(path.into().into_bytes()).await?;
-        Ok(expanded.map(|path| String::from_utf8_lossy(&path).into_owned()))
-    }
-
-    /// Expands a `~`/`~user`-prefixed or relative path using raw SFTP path bytes and returns raw
-    /// bytes from the server.
-    pub async fn expand_path_bytes<P: Into<Vec<u8>>>(
+    pub async fn expand_path<P: Into<SftpString>>(
         &self,
         path: P,
-    ) -> SftpResult<Option<Vec<u8>>> {
+    ) -> SftpResult<Option<SftpString>> {
         if !self.features.expand_path {
             return Ok(None);
         }
 
-        let name = self
-            .session
-            .expand_path(String::from_utf8_lossy(&path.into()).into_owned())
-            .await?;
+        let name = self.session.expand_path(path).await?;
         match name.files.first() {
             Some(file) => Ok(Some(file.filename.to_owned())),
             None => Err(Error::UnexpectedBehavior("no file".to_owned())),
@@ -517,6 +415,407 @@ impl SftpSession {
     }
 }
 
+#[cfg(feature = "raw-string")]
+impl SftpSession {
+    pub async fn open_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<File> {
+        self.open(path.into()).await
+    }
+    pub async fn create_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<File> {
+        self.create(path.into()).await
+    }
+    pub async fn canonicalize_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Vec<u8>> {
+        self.canonicalize(path.into())
+            .await
+            .map(SftpString::into_bytes)
+    }
+    pub async fn create_dir_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<()> {
+        self.create_dir(path.into()).await
+    }
+    pub async fn read_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Vec<u8>> {
+        self.read(path.into()).await
+    }
+    pub async fn try_exists_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<bool> {
+        self.try_exists(path.into()).await
+    }
+    pub async fn read_dir_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<ReadDir> {
+        self.read_dir(path.into()).await
+    }
+    pub async fn read_link_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Vec<u8>> {
+        self.read_link(path.into())
+            .await
+            .map(SftpString::into_bytes)
+    }
+    pub async fn remove_dir_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<()> {
+        self.remove_dir(path.into()).await
+    }
+    pub async fn remove_file_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<()> {
+        self.remove_file(path.into()).await
+    }
+    pub async fn metadata_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Metadata> {
+        self.metadata(path.into()).await
+    }
+    pub async fn symlink_metadata_bytes<P: Into<Vec<u8>>>(&self, path: P) -> SftpResult<Metadata> {
+        self.symlink_metadata(path.into()).await
+    }
+    pub async fn expand_path_bytes<P: Into<Vec<u8>>>(
+        &self,
+        path: P,
+    ) -> SftpResult<Option<Vec<u8>>> {
+        self.expand_path(path.into())
+            .await
+            .map(|value| value.map(SftpString::into_bytes))
+    }
+    pub async fn write_bytes<P: Into<Vec<u8>>>(&self, path: P, data: &[u8]) -> SftpResult<()> {
+        let mut file = self
+            .open_with_flags_bytes(path.into(), OpenFlags::WRITE)
+            .await?;
+        file.write_all(data).await?;
+        file.flush().await?;
+        file.close().await?;
+        Ok(())
+    }
+    pub async fn open_with_flags_bytes(&self, path: Vec<u8>, flags: OpenFlags) -> SftpResult<File> {
+        self.open_with_flags(path, flags).await
+    }
+    pub async fn open_with_flags_and_attributes_bytes(
+        &self,
+        path: Vec<u8>,
+        flags: OpenFlags,
+        attrs: FileAttributes,
+    ) -> SftpResult<File> {
+        self.open_with_flags_and_attributes(path, flags, attrs)
+            .await
+    }
+    pub async fn set_metadata_bytes<P: Into<Vec<u8>>>(
+        &self,
+        path: P,
+        attrs: Metadata,
+    ) -> SftpResult<()> {
+        self.set_metadata(path.into(), attrs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use tokio::{
+        io::{AsyncSeekExt, DuplexStream},
+        sync::mpsc,
+    };
+
+    use super::*;
+    use crate::{
+        protocol::{self, Data, Handle, Name, Packet, Version},
+        utils::read_packet,
+    };
+
+    /// Answers each client packet with the one returned by `reply`
+    fn serve<F>(mut stream: DuplexStream, mut reply: F)
+    where
+        F: FnMut(Packet) -> Packet + Send + 'static,
+    {
+        tokio::spawn(async move {
+            while let Ok(mut bytes) = read_packet(&mut stream, 1024).await {
+                let packet = reply(Packet::try_from(&mut bytes).unwrap());
+                let bytes = Bytes::try_from(packet).unwrap();
+                stream.write_all(&bytes).await.unwrap();
+            }
+        });
+    }
+
+    #[cfg(feature = "raw-string")]
+    #[tokio::test]
+    async fn byte_path_adapters_keep_non_utf8_and_write_without_truncating() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => {
+                let mut version = Version::new();
+                version
+                    .extensions
+                    .insert(extensions::EXPAND_PATH.to_owned(), "1".to_owned());
+                version.into()
+            }
+            Packet::Open(open) => {
+                assert_eq!(open.filename.as_bytes(), b"file-\xff");
+                assert_eq!(open.pflags.bits(), OpenFlags::WRITE.bits());
+                Handle {
+                    id: open.id,
+                    handle: b"\x80".into(),
+                }
+                .into()
+            }
+            Packet::RealPath(path) => {
+                assert_eq!(path.path.as_bytes(), b"file-\xff");
+                Name {
+                    id: path.id,
+                    files: vec![protocol::File::dummy(b"/file-\xff")],
+                }
+                .into()
+            }
+            Packet::ReadLink(path) => {
+                assert_eq!(path.path.as_bytes(), b"link-\xff");
+                Name {
+                    id: path.id,
+                    files: vec![protocol::File::dummy(b"file-\xff")],
+                }
+                .into()
+            }
+            Packet::Extended(request) => {
+                assert_eq!(request.request, extensions::EXPAND_PATH);
+                // SFTP strings are a big-endian byte count followed by unchanged bytes.
+                tx.send(request.data).unwrap();
+                Name {
+                    id: request.id,
+                    files: vec![protocol::File::dummy(b"/file-\xff")],
+                }
+                .into()
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+        let session = SftpSession::new(client).await.unwrap();
+        session
+            .write_bytes(b"file-\xff".to_vec(), b"data")
+            .await
+            .unwrap();
+        assert_eq!(
+            session
+                .canonicalize_bytes(b"file-\xff".to_vec())
+                .await
+                .unwrap(),
+            b"/file-\xff"
+        );
+        assert_eq!(
+            session
+                .read_link_bytes(b"link-\xff".to_vec())
+                .await
+                .unwrap(),
+            b"file-\xff"
+        );
+        assert_eq!(
+            session
+                .expand_path_bytes(b"file-\xff".to_vec())
+                .await
+                .unwrap(),
+            Some(b"/file-\xff".to_vec())
+        );
+        assert_eq!(rx.recv().await.unwrap(), b"\0\0\0\x06file-\xff");
+    }
+
+    #[tokio::test]
+    async fn read_dir_keeps_server_order() {
+        let (client, server) = tokio::io::duplex(1024);
+        let mut batches = [vec!["a", "b", "c"], vec!["d", "e"]].into_iter();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::OpenDir(opendir) => Handle {
+                id: opendir.id,
+                handle: opendir.path.into(),
+            }
+            .into(),
+            Packet::ReadDir(readdir) => match batches.next() {
+                Some(names) => Name {
+                    id: readdir.id,
+                    files: names.into_iter().map(protocol::File::dummy).collect(),
+                }
+                .into(),
+                None => Packet::error(readdir.id, StatusCode::Eof),
+            },
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        let names: Vec<_> = sftp
+            .read_dir("/")
+            .await
+            .unwrap()
+            .map(|entry| entry.file_name())
+            .collect();
+
+        assert_eq!(names, ["a", "b", "c", "d", "e"]);
+    }
+
+    #[cfg(feature = "raw-string")]
+    #[tokio::test]
+    async fn read_dir_keeps_non_utf8_names() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut names = [b"\xbf"].into_iter();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::OpenDir(opendir) => Handle {
+                id: opendir.id,
+                handle: opendir.path.into(),
+            }
+            .into(),
+            Packet::ReadDir(readdir) => match names.next() {
+                Some(name) => Name {
+                    id: readdir.id,
+                    files: vec![protocol::File::dummy(name)],
+                }
+                .into(),
+                None => Packet::error(readdir.id, StatusCode::Eof),
+            },
+            Packet::Remove(remove) => {
+                tx.send(remove.filename).unwrap();
+                Packet::error(remove.id, StatusCode::Ok)
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        let entry = sftp.read_dir("dir").await.unwrap().next().unwrap();
+        assert_eq!(entry.file_name().to_string(), "\u{fffd}");
+
+        sftp.remove_file(entry.path()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().as_bytes(), b"dir/\xbf");
+    }
+
+    #[tokio::test]
+    async fn handle_bytes_are_kept() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::Open(open) => Handle {
+                id: open.id,
+                handle: b"\0\0\0\x80".into(),
+            }
+            .into(),
+            Packet::Close(close) => {
+                tx.send(close.handle).unwrap();
+                Packet::error(close.id, StatusCode::Ok)
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        sftp.open("file").await.unwrap().close().await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().as_bytes(), b"\0\0\0\x80");
+    }
+
+    #[tokio::test]
+    async fn read_dir_closes_handle_on_error() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::OpenDir(opendir) => Handle {
+                id: opendir.id,
+                handle: opendir.path.into(),
+            }
+            .into(),
+            Packet::Close(close) => {
+                tx.send(close.handle).unwrap();
+                Packet::error(close.id, StatusCode::Ok)
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Failure),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        assert!(sftp.read_dir("dir").await.is_err());
+        assert_eq!(rx.recv().await.unwrap().as_bytes(), b"dir");
+    }
+
+    #[tokio::test]
+    async fn seek_resets_read_chunk_len() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::Open(open) => Handle {
+                id: open.id,
+                handle: open.filename.into(),
+            }
+            .into(),
+            Packet::Read(read) => {
+                tx.send(read.len).unwrap();
+                Data {
+                    id: read.id,
+                    data: vec![0; 10],
+                }
+                .into()
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        let mut file = sftp.open("file").await.unwrap();
+
+        // Each read is short, the second one must probe the full length again
+        for _ in 0..2 {
+            file.read_exact(&mut [0; 10]).await.unwrap();
+            file.rewind().await.unwrap();
+        }
+
+        assert_eq!(rx.recv().await, rx.recv().await);
+    }
+
+    #[tokio::test]
+    async fn write_creates_and_truncates() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        serve(server, move |packet| match packet {
+            Packet::Init(_) => Version::new().into(),
+            Packet::Open(open) => {
+                tx.send(open.pflags).unwrap();
+                Handle {
+                    id: open.id,
+                    handle: open.filename.into(),
+                }
+                .into()
+            }
+            packet => Packet::error(packet.get_request_id(), StatusCode::Ok),
+        });
+
+        let sftp = SftpSession::new(client).await.unwrap();
+        sftp.write("file", b"data").await.unwrap();
+
+        let flags = rx.recv().await.unwrap();
+        assert!(flags.contains(OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE));
+    }
+
+    #[tokio::test]
+    async fn posix_rename_requires_extension() {
+        for supported in [true, false] {
+            let (client, server) = tokio::io::duplex(1024);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+
+            serve(server, move |packet| match packet {
+                Packet::Init(_) => {
+                    let mut version = Version::new();
+                    if supported {
+                        let name = extensions::POSIX_RENAME.to_owned();
+                        version.extensions.insert(name, "1".to_owned());
+                    }
+                    version.into()
+                }
+                Packet::Extended(extended) => {
+                    tx.send((extended.request, extended.data)).unwrap();
+                    Packet::error(extended.id, StatusCode::Ok)
+                }
+                packet => Packet::error(packet.get_request_id(), StatusCode::OpUnsupported),
+            });
+
+            let sftp = SftpSession::new(client).await.unwrap();
+            assert_eq!(sftp.posix_rename("old", "new").await.unwrap(), supported);
+
+            let request = (
+                extensions::POSIX_RENAME.to_owned(),
+                b"\0\0\0\x03old\0\0\0\x03new".to_vec(),
+            );
+            assert_eq!(rx.try_recv().ok(), supported.then_some(request));
+        }
+    }
+}
+
+#[cfg(any(feature = "raw-string", test))]
 fn posix_rename_payload(oldpath: &[u8], newpath: &[u8]) -> SftpResult<Vec<u8>> {
     let mut data = Vec::new();
     for path in [oldpath, newpath] {
@@ -529,7 +828,7 @@ fn posix_rename_payload(oldpath: &[u8], newpath: &[u8]) -> SftpResult<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+mod fork_tests {
     use super::*;
 
     impl SftpSession {

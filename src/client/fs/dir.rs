@@ -1,24 +1,20 @@
 use std::{collections::VecDeque, sync::Arc};
 
 use super::Metadata;
-use crate::protocol::FileType;
+use crate::protocol::{FileType, SftpString};
 
 /// Entries returned by the [`ReadDir`] iterator.
 #[derive(Debug)]
 pub struct DirEntry {
-    parent: Arc<[u8]>,
-    file: Vec<u8>,
+    parent: Arc<SftpString>,
+    file: SftpString,
     metadata: Metadata,
 }
 
 impl DirEntry {
     /// Returns the file name for the file that this entry points at.
-    pub fn file_name(&self) -> String {
-        String::from_utf8_lossy(&self.file).into_owned()
-    }
-
-    pub fn file_name_bytes(&self) -> &[u8] {
-        &self.file
+    pub fn file_name(&self) -> SftpString {
+        self.file.to_owned()
     }
 
     /// Returns the file type for the file that this entry points at.
@@ -39,30 +35,19 @@ impl DirEntry {
     /// POSIX-style paths on the wire). No canonicalization is performed, so a
     /// relative input yields a relative result — mirroring the behaviour of
     /// [`std::fs::DirEntry::path`].
-    pub fn path(&self) -> String {
-        String::from_utf8_lossy(&self.path_bytes()).into_owned()
-    }
-
-    pub fn path_bytes(&self) -> Vec<u8> {
-        if self.parent.is_empty() {
-            self.file.clone()
-        } else if self.parent.ends_with(b"/") {
-            let mut path = self.parent.to_vec();
-            path.extend_from_slice(&self.file);
-            path
-        } else {
-            let mut path = self.parent.to_vec();
-            path.push(b'/');
-            path.extend_from_slice(&self.file);
-            path
-        }
+    pub fn path(&self) -> SftpString {
+        let mut path = SftpString::clone(&self.parent);
+        let has_separator = path.is_empty() || path.as_bytes().ends_with(b"/");
+        path.push_str(if has_separator { "" } else { "/" });
+        path.push_str(&self.file);
+        path
     }
 }
 
 /// Iterator over the entries in a remote directory.
 pub struct ReadDir {
-    pub(crate) parent: Arc<[u8]>,
-    pub(crate) entries: VecDeque<(Vec<u8>, Metadata)>,
+    pub(crate) parent: Arc<SftpString>,
+    pub(crate) entries: VecDeque<(SftpString, Metadata)>,
 }
 
 impl Iterator for ReadDir {
@@ -71,12 +56,21 @@ impl Iterator for ReadDir {
     fn next(&mut self) -> Option<Self::Item> {
         match self.entries.pop_front() {
             None => None,
-            Some(entry) if entry.0 == b"." || entry.0 == b".." => self.next(),
+            Some(entry) if entry.0.as_bytes() == b"." || entry.0.as_bytes() == b".." => self.next(),
             Some(entry) => Some(DirEntry {
                 parent: self.parent.clone(),
                 file: entry.0,
                 metadata: entry.1,
             }),
         }
+    }
+}
+
+impl DirEntry {
+    pub fn file_name_bytes(&self) -> &[u8] {
+        self.file.as_bytes()
+    }
+    pub fn path_bytes(&self) -> Vec<u8> {
+        self.path().into_bytes()
     }
 }
